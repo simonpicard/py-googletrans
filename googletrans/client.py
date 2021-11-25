@@ -219,7 +219,7 @@ class Translator:
                 print(resp)
                 print(data)
                 print(parsed)
-        except:
+        except Exception as e:
             print(resp)
             print(data)
             raise
