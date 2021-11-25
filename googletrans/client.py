@@ -94,6 +94,7 @@ class Translator:
         self.raise_exception = raise_exception
 
         self.print_test = True
+        print("THIS IS UPDATED")
 
     def _build_rpc_request(self, text: str, dest: str, src: str):
         return json.dumps(
