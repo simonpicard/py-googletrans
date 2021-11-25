@@ -209,7 +209,12 @@ class Translator:
                 break
 
         data = json.loads(resp)
-        parsed = json.loads(data[0][2])
+        try:
+            parsed = json.loads(data[0][2])
+        except:
+            print(resp)
+            print(data)
+            raise
         # not sure
         should_spacing = parsed[1][0][0][3]
         translated_parts = list(
