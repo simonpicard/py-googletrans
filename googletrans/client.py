@@ -93,6 +93,8 @@ class Translator:
 
         self.raise_exception = raise_exception
 
+        self.print_test = True
+
     def _build_rpc_request(self, text: str, dest: str, src: str):
         return json.dumps(
             [
@@ -211,6 +213,11 @@ class Translator:
         data = json.loads(resp)
         try:
             parsed = json.loads(data[0][2])
+            if self.print_test:
+                self.print_test = False
+                print(resp)
+                print(data)
+                print(parsed)
         except:
             print(resp)
             print(data)
