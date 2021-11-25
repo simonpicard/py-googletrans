@@ -6,6 +6,8 @@ You can translate text using this module.
 """
 import random
 import typing
+import re
+import json
 
 import httpcore
 import httpx
@@ -14,6 +16,8 @@ from httpx import Timeout
 from googletrans import urls, utils
 from googletrans.gtoken import TokenAcquirer
 from googletrans.constants import (
+    DEFAULT_CLIENT_SERVICE_URLS,
+    DEFAULT_FALLBACK_SERVICE_URLS,
     DEFAULT_USER_AGENT,
     LANGCODES,
     LANGUAGES,
@@ -21,9 +25,11 @@ from googletrans.constants import (
     DEFAULT_RAISE_EXCEPTION,
     DUMMY_DATA,
 )
-from googletrans.models import Translated, Detected
+from googletrans.models import Translated, Detected, TranslatedPart
 
 EXCLUDES = ("en", "ca", "fr")
+
+RPC_ID = "MkEWBc"
 
 
 class Translator:
@@ -33,6 +39,7 @@ class Translator:
 
     :param service_urls: google translate url list. URLs will be used randomly.
                          For example ``['translate.google.com', 'translate.google.co.kr']``
+                         To preferably use the non webapp api, service url should be translate.googleapis.com
     :type service_urls: a sequence of strings
 
     :param user_agent: the User-Agent header to send when making requests.
@@ -50,58 +57,87 @@ class Translator:
                     Dictionary mapping protocol or protocol and host to the URL of the proxy
                     For example ``{'http': 'foo.bar:3128', 'http://host.name': 'foo.bar:4012'}``
     :param raise_exception: if `True` then raise exception if smth will go wrong
+    :param http2: whether to use HTTP2 (default: True)
+    :param use_fallback: use a fallback method
     :type raise_exception: boolean
     """
 
     def __init__(
         self,
-        service_urls=None,
+        service_urls=DEFAULT_CLIENT_SERVICE_URLS,
         user_agent=DEFAULT_USER_AGENT,
         raise_exception=DEFAULT_RAISE_EXCEPTION,
         proxies: typing.Dict[str, httpcore.SyncHTTPTransport] = None,
         timeout: Timeout = 5,
         http2=True,
+        use_fallback=False,
     ):
 
-        self.client = httpx.Client(http2=http2, proxies=proxies, timeout=timeout)
+        self.client = httpx.Client(http2=http2, timeout=timeout, proxies=proxies)
 
         self.client.headers.update(
-            {"User-Agent": user_agent,}
+            {"User-Agent": user_agent, "Referer": "https://translate.google.com",}
         )
 
-        self.service_urls = service_urls or ["translate.google.com"]
-        self.token_acquirer = TokenAcquirer(
-            client=self.client, host=self.service_urls[0]
-        )
+        if use_fallback:
+            self.service_urls = DEFAULT_FALLBACK_SERVICE_URLS
+            self.client_type = "gtx"
+            pass
+        else:
+            # default way of working: use the defined values from user app
+            self.service_urls = service_urls
+            self.client_type = "tw-ob"
+            self.token_acquirer = TokenAcquirer(
+                client=self.client, host=self.service_urls[0]
+            )
+
         self.raise_exception = raise_exception
+
+    def _build_rpc_request(self, text: str, dest: str, src: str):
+        return json.dumps(
+            [
+                [
+                    [
+                        RPC_ID,
+                        json.dumps(
+                            [[text, src, dest, True], [None]], separators=(",", ":")
+                        ),
+                        None,
+                        "generic",
+                    ],
+                ]
+            ],
+            separators=(",", ":"),
+        )
 
     def _pick_service_url(self):
         if len(self.service_urls) == 1:
             return self.service_urls[0]
         return random.choice(self.service_urls)
 
-    def _translate(self, text, dest, src, override):
-        token = self.token_acquirer.do(text)
-        params = utils.build_params(
-            query=text, src=src, dest=dest, token=token, override=override
-        )
+    def _translate(self, text: str, dest: str, src: str):
+        url = urls.TRANSLATE_RPC.format(host=self._pick_service_url())
+        data = {
+            "f.req": self._build_rpc_request(text, dest, src),
+        }
+        params = {
+            "rpcids": RPC_ID,
+            "bl": "boq_translate-webserver_20201207.13_p0",
+            "soc-app": 1,
+            "soc-platform": 1,
+            "soc-device": 1,
+            "rt": "c",
+        }
+        r = self.client.post(url, params=params, data=data)
 
-        url = urls.TRANSLATE.format(host=self._pick_service_url())
-        r = self.client.get(url, params=params)
-
-        if r.status_code == 200:
-            data = utils.format_json(r.text)
-            return data, r
-
-        if self.raise_exception:
+        if r.status_code != 200 and self.raise_exception:
             raise ConnectionError(
                 'Unexpected status code "{}" from {}'.format(
                     r.status_code, self.service_urls
                 )
             )
 
-        DUMMY_DATA[0][0][0] = text
-        return DUMMY_DATA, r
+        return r.text, r
 
     def _parse_extra_data(self, data):
         response_parts_name_mapping = {
@@ -127,45 +163,7 @@ class Translator:
 
         return extra
 
-    def translate(self, text, dest="en", src="auto", **kwargs):
-        """Translate text from source language to destination language
-
-        :param text: The source text(s) to be translated. Batch translation is supported via sequence input.
-        :type text: UTF-8 :class:`str`; :class:`unicode`; string sequence (list, tuple, iterator, generator)
-
-        :param dest: The language to translate the source text into.
-                     The value should be one of the language codes listed in :const:`googletrans.LANGUAGES`
-                     or one of the language names listed in :const:`googletrans.LANGCODES`.
-        :param dest: :class:`str`; :class:`unicode`
-
-        :param src: The language of the source text.
-                    The value should be one of the language codes listed in :const:`googletrans.LANGUAGES`
-                    or one of the language names listed in :const:`googletrans.LANGCODES`.
-                    If a language is not specified,
-                    the system will attempt to identify the source language automatically.
-        :param src: :class:`str`; :class:`unicode`
-
-        :rtype: Translated
-        :rtype: :class:`list` (when a list is passed)
-
-        Basic usage:
-            >>> from googletrans import Translator
-            >>> translator = Translator()
-            >>> translator.translate('안녕하세요.')
-            <Translated src=ko dest=en text=Good evening. pronunciation=Good evening.>
-            >>> translator.translate('안녕하세요.', dest='ja')
-            <Translated src=ko dest=ja text=こんにちは。 pronunciation=Kon'nichiwa.>
-            >>> translator.translate('veritas lux mea', src='la')
-            <Translated src=la dest=en text=The truth is my light pronunciation=The truth is my light>
-
-        Advanced usage:
-            >>> translations = translator.translate(['The quick brown fox', 'jumps over', 'the lazy dog'], dest='ko')
-            >>> for translation in translations:
-            ...    print(translation.origin, ' -> ', translation.text)
-            The quick brown fox  ->  빠른 갈색 여우
-            jumps over  ->  이상 점프
-            the lazy dog  ->  게으른 개
-        """
+    def translate(self, text: str, dest="en", src="auto"):
         dest = dest.lower().split("_", 1)[0]
         src = src.lower().split("_", 1)[0]
 
@@ -185,109 +183,94 @@ class Translator:
             else:
                 raise ValueError("invalid destination language")
 
-        if isinstance(text, list):
-            result = []
-            for item in text:
-                translated = self.translate(item, dest=dest, src=src, **kwargs)
-                result.append(translated)
-            return result
-
         origin = text
-        data, response = self._translate(text, dest, src, kwargs)
+        data, response = self._translate(text, dest, src)
 
-        # this code will be updated when the format is changed.
-        translated = "".join([d[0] if d[0] else "" for d in data[0]])
+        token_found = False
+        square_bracket_counts = [0, 0]
+        resp = ""
+        for line in data.split("\n"):
+            token_found = token_found or f'"{RPC_ID}"' in line[:30]
+            if not token_found:
+                continue
 
-        extra_data = self._parse_extra_data(data)
+            is_in_string = False
+            for index, char in enumerate(line):
+                if char == '"' and line[max(0, index - 1)] != "\\":
+                    is_in_string = not is_in_string
+                if not is_in_string:
+                    if char == "[":
+                        square_bracket_counts[0] += 1
+                    elif char == "]":
+                        square_bracket_counts[1] += 1
 
-        # actual source language that will be recognized by Google Translator when the
-        # src passed is equal to auto.
-        try:
-            src = data[2]
-        except Exception:  # pragma: nocover
-            pass
+            resp += line
+            if square_bracket_counts[0] == square_bracket_counts[1]:
+                break
 
-        pron = origin
-        try:
-            pron = data[0][1][-2]
-        except Exception:  # pragma: nocover
-            pass
+        data = json.loads(resp)
+        parsed = json.loads(data[0][2])
+        # not sure
+        should_spacing = parsed[1][0][0][3]
+        translated_parts = list(
+            map(
+                lambda part: TranslatedPart(part[0], part[1] if len(part) >= 2 else []),
+                parsed[1][0][0][5],
+            )
+        )
+        translated = (" " if should_spacing else "").join(
+            map(lambda part: part.text, translated_parts)
+        )
 
-        if pron is None:
+        if src == "auto":
             try:
-                pron = data[0][1][2]
-            except:  # pragma: nocover
+                src = parsed[2]
+            except:
+                pass
+        if src == "auto":
+            try:
+                src = parsed[0][2]
+            except:
                 pass
 
-        if dest in EXCLUDES and pron == origin:
-            pron = translated
+        # currently not available
+        confidence = None
 
-        # put final values into a new Translated object
+        origin_pronunciation = None
+        try:
+            origin_pronunciation = parsed[0][0]
+        except:
+            pass
+
+        pronunciation = None
+        try:
+            pronunciation = parsed[1][0][0][1]
+        except:
+            pass
+
+        extra_data = {
+            "confidence": confidence,
+            "parts": translated_parts,
+            "origin_pronunciation": origin_pronunciation,
+            "parsed": parsed,
+        }
         result = Translated(
             src=src,
             dest=dest,
             origin=origin,
             text=translated,
-            pronunciation=pron,
+            pronunciation=pronunciation,
+            parts=translated_parts,
             extra_data=extra_data,
             response=response,
         )
-
         return result
 
-    def detect(self, text, **kwargs):
-        """Detect language of the input text
-
-        :param text: The source text(s) whose language you want to identify.
-                     Batch detection is supported via sequence input.
-        :type text: UTF-8 :class:`str`; :class:`unicode`; string sequence (list, tuple, iterator, generator)
-
-        :rtype: Detected
-        :rtype: :class:`list` (when a list is passed)
-
-        Basic usage:
-            >>> from googletrans import Translator
-            >>> translator = Translator()
-            >>> translator.detect('이 문장은 한글로 쓰여졌습니다.')
-            <Detected lang=ko confidence=0.27041003>
-            >>> translator.detect('この文章は日本語で書かれました。')
-            <Detected lang=ja confidence=0.64889508>
-            >>> translator.detect('This sentence is written in English.')
-            <Detected lang=en confidence=0.22348526>
-            >>> translator.detect('Tiu frazo estas skribita en Esperanto.')
-            <Detected lang=eo confidence=0.10538048>
-
-        Advanced usage:
-            >>> langs = translator.detect(['한국어', '日本語', 'English', 'le français'])
-            >>> for lang in langs:
-            ...    print(lang.lang, lang.confidence)
-            ko 1
-            ja 0.92929292
-            en 0.96954316
-            fr 0.043500196
-        """
-        if isinstance(text, list):
-            result = []
-            for item in text:
-                lang = self.detect(item)
-                result.append(lang)
-            return result
-
-        data, response = self._translate(text, "en", "auto", kwargs)
-
-        # actual source language that will be recognized by Google Translator when the
-        # src passed is equal to auto.
-        src = ""
-        confidence = 0.0
-        try:
-            if len(data[8][0]) > 1:
-                src = data[8][0]
-                confidence = data[8][-2]
-            else:
-                src = "".join(data[8][0])
-                confidence = data[8][-2][0]
-        except Exception:  # pragma: nocover
-            pass
-        result = Detected(lang=src, confidence=confidence, response=response)
-
+    def detect(self, text: str):
+        translated = self.translate(text, src="auto", dest="en")
+        result = Detected(
+            lang=translated.src,
+            confidence=translated.extra_data.get("confidence", None),
+            response=translated._response,
+        )
         return result
