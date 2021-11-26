@@ -27,6 +27,8 @@ from googletrans.constants import (
 )
 from googletrans.models import Translated, Detected, TranslatedPart
 
+import logging
+
 EXCLUDES = ("en", "ca", "fr")
 
 RPC_ID = "MkEWBc"
@@ -92,9 +94,6 @@ class Translator:
             )
 
         self.raise_exception = raise_exception
-
-        self.print_test = True
-        print("THIS IS UPDATED")
 
     def _build_rpc_request(self, text: str, dest: str, src: str):
         return json.dumps(
@@ -167,6 +166,7 @@ class Translator:
         return extra
 
     def translate(self, text: str, dest="en", src="auto"):
+
         dest = dest.lower().split("_", 1)[0]
         src = src.lower().split("_", 1)[0]
 
@@ -212,17 +212,7 @@ class Translator:
                 break
 
         data = json.loads(resp)
-        try:
-            parsed = json.loads(data[0][2])
-            if self.print_test:
-                self.print_test = False
-                print(resp)
-                print(data)
-                print(parsed)
-        except Exception as e:
-            print(resp)
-            print(data)
-            raise
+        parsed = json.loads(data[0][2])
         # not sure
         should_spacing = parsed[1][0][0][3]
         translated_parts = list(
